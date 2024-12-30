@@ -2575,7 +2575,7 @@ class FbxImportHelperNode:
             if not child.meshes:
                 child.collect_skeleton_meshes(meshes)
 
-    def collect_armature_meshes(self):
+    def collect_armature_meshes(self, parent_change_dict):
         if self.is_armature:
             armature_matrix_inv = self.get_world_matrix().inverted_safe()
 
@@ -2583,7 +2583,7 @@ class FbxImportHelperNode:
             for child in self.children:
                 # Children meshes may be linked to children armatures, in which case we do not want to link them
                 # to a parent one. See T70244.
-                child.collect_armature_meshes()
+                child.collect_armature_meshes(parent_change_dict)
                 if not child.meshes:
                     child.collect_skeleton_meshes(meshes)
             for m in meshes:
@@ -2591,11 +2591,11 @@ class FbxImportHelperNode:
                 m.matrix = armature_matrix_inv @ m.get_world_matrix()
                 m.anim_compensation_matrix = old_matrix.inverted_safe() @ m.matrix
                 m.is_global_animation = True
-                m.parent = self
+                parent_change_dict[m] = self
             self.meshes = meshes
         else:
             for child in self.children:
-                child.collect_armature_meshes()
+                child.collect_armature_meshes(parent_change_dict)
 
     def build_skeleton(self, arm, parent_matrix, settings, parent_bone_size=1):
         def child_connect(par_bone, child_bone, child_head, connect_ctx):
@@ -2965,27 +2965,8 @@ class FbxImportHelperNode:
             # Add armature modifiers to the meshes
             if self.meshes:
                 for mesh in self.meshes:
-                    (mmat, amat) = mesh.armature_setup[self]
-                    me_obj = mesh.bl_obj
-
-                    # bring global armature & mesh matrices into *Blender* global space.
-                    # Note: Usage of matrix_geom (local 'diff' transform) here is quite brittle.
-                    #       Among other things, why in hell isn't it taken into account by bindpose & co???
-                    #       Probably because org app (max) handles it completely aside from any parenting stuff,
-                    #       which we obviously cannot do in Blender. :/
-                    if amat is None:
-                        amat = self.bind_matrix
-                    amat = settings.global_matrix @ (Matrix() if amat is None else amat)
-                    if self.matrix_geom:
-                        amat = amat @ self.matrix_geom
-                    mmat = settings.global_matrix @ mmat
-                    if mesh.matrix_geom:
-                        mmat = mmat @ mesh.matrix_geom
-
-                    # Now that we have armature and mesh in there (global) bind 'state' (matrix),
-                    # we can compute inverse parenting matrix of the mesh.
-                    me_obj.matrix_parent_inverse = amat.inverted_safe() @ mmat @ me_obj.matrix_basis.inverted_safe()
-
+                    # XXXX: Meshes are already parented at the root origin
+                    # the conversion that we had here had issues with many models
                     mod = mesh.bl_obj.modifiers.new(arm.name, 'ARMATURE')
                     mod.object = arm
 
@@ -3520,7 +3501,15 @@ def load(operator, context, filepath="",
         root_helper.make_bind_pose_local()
 
         # collect armature meshes
-        root_helper.collect_armature_meshes()
+
+        # XXXX: The `collect_armature_meshes` function was modifying the lists it was iterating over, 
+        # which sometimes broke the loop and prevented some meshes from being added to the armature meshes list.
+        # Here, we use a dictionary to store the meshes that need their parent changed, and set their parents 
+        # after the armatures have been collected.
+        parent_change_dict = {}
+        root_helper.collect_armature_meshes(parent_change_dict)
+        for key, value in parent_change_dict.items():
+            key.parent = value
 
         # find the correction matrices to align FBX objects with their Blender equivalent
         root_helper.find_correction_matrix(settings)
